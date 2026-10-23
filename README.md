@@ -1,28 +1,22 @@
 # Mi Cámara
 
-App Android mínima (Kotlin + Jetpack Compose + Media3) para ver tu cámara por **RTSP** en la red local.
-Sin anuncios, sin rastreadores, sin cuentas. Solo pide permiso de Internet/red.
+App Android (Kotlin + Jetpack Compose + Media3) para ver cámaras IP por **RTSP** y controlarlas por **ONVIF**.
+Sin anuncios, sin rastreadores, sin cuentas ni nube. Solo permisos de red.
 
-## Cómo compilar
-1. Abre la carpeta en **Android Studio** (Ladybug o más nuevo). Aceptará crear el wrapper de Gradle y sincronizará solo.
-2. Conecta tu teléfono (depuración USB) y pulsa **Run**, o usa *Build > Build APK(s)*.
+## Funciones
+- **Búsqueda automática**: encuentra la IP de la cámara en tu WiFi (ONVIF WS-Discovery + escaneo del puerto RTSP 554) y detecta el puerto ONVIF.
+- **Varias cámaras**: lista con alta, edición y borrado.
+- **PTZ**: joystick de giro/inclinación, zoom y control de velocidad (mantén presionado para mover).
+- **Luz LED**: interruptor por comando auxiliar ONVIF (configurable por cámara).
+- Tema oscuro, pantalla encendida mientras ves el video.
 
-## Cómo usarla
-1. Teléfono y cámara en la **misma red WiFi**.
-2. Introduce la IP de la cámara, puerto (554), usuario/contraseña (si los pide) y la ruta del stream.
-3. Pulsa **Ver en vivo**.
+## Compilar
+- Con Android Studio: abre la carpeta y pulsa Run.
+- Sin PC: el workflow `.github/workflows/build.yml` compila el APK en GitHub (pestaña Actions > Run workflow > Artifacts).
 
-## Rutas RTSP comunes en cámaras V380 / genéricas
-Prueba estas (primero en VLC para verificar):
-- `live/ch00_0`
-- `live/ch00_1` (subflujo, menor calidad)
-- `onvif1`
-- `stream1`
-
-## Si no conecta
-- Muchas V380 vienen con RTSP **desactivado**. Hay que habilitarlo desde la app original (ajustes avanzados / ONVIF) o con firmware que lo soporte.
-- Verifica con `nmap -p 554 IP_CAMARA` o con VLC (`Medio > Abrir ubicación de red`).
-- Si el puerto 554 está cerrado, la cámara solo habla con la nube del fabricante y esta app no podrá verla.
-
-## Nota
-Usuario y contraseña se guardan en el almacenamiento privado de la app (SharedPreferences). Para uso doméstico basta; si quieres más seguridad, cámbialo por `EncryptedSharedPreferences`.
+## Notas importantes
+- Teléfono y cámara deben estar en la **misma WiFi**.
+- Muchas cámaras V380 traen RTSP/ONVIF desactivado o solo hablan con la nube del fabricante. Si la búsqueda no encuentra nada, la cámara no expone esos servicios.
+- La luz LED no tiene comando estándar en ONVIF: por defecto se usa `tt:IRLamp|On/Off`. Si tu modelo usa otro, cámbialo en Editar > Ajustes avanzados.
+- Si la cámara se mueve al revés, activa "Invertir giro" o "Invertir inclinación" en Ajustes avanzados.
+- Las contraseñas se guardan en el almacenamiento privado de la app.

@@ -1,199 +1,98 @@
 package com.micamara.app
 
 import android.os.Bundle
-import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.annotation.OptIn
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.rtsp.RtspMediaSource
-import androidx.media3.ui.PlayerView
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) { App() }
-            }
+            MiCamaraTheme { App() }
         }
     }
+
+    override fun onStart() {
+        super.onStart()
+        WifiBinder.bind(this)
+    }
+}
+
+sealed interface Screen {
+    data object Home : Screen
+    data class Edit(val id: String?) : Screen
+    data class Live(val id: String) : Screen
 }
 
 @Composable
 fun App() {
     val context = LocalContext.current
-    val store = remember { ConfigStore(context) }
-    var config by remember { mutableStateOf(store.load()) }
-    var watching by remember { mutableStateOf(false) }
+    val repo = remember { CameraRepository(context) }
+    var cameras by remember { mutableStateOf(repo.load()) }
+    var screen by remember { mutableStateOf<Screen>(Screen.Home) }
 
-    if (watching) {
-        BackHandler { watching = false }
-        LiveView(url = config.rtspUrl(), onClose = { watching = false })
-    } else {
-        SettingsForm(
-            config = config,
-            onChange = { config = it },
-            onWatch = {
-                store.save(config)
-                watching = true
-            },
-        )
+    fun persist(list: List<Camera>) {
+        cameras = list
+        repo.save(list)
     }
-}
 
-@Composable
-fun SettingsForm(
-    config: CameraConfig,
-    onChange: (CameraConfig) -> Unit,
-    onWatch: () -> Unit,
-) {
-    Column(
-        modifier = Modifier
+    Box(
+        Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .background(MaterialTheme.colorScheme.background)
+            .statusBarsPadding()
+            .navigationBarsPadding(),
     ) {
-        Text("Mi Cámara", style = MaterialTheme.typography.headlineMedium)
-        Text(
-            "Conexión directa por RTSP en tu red local. Sin anuncios, sin cuentas, sin nube.",
-            style = MaterialTheme.typography.bodyMedium,
-        )
+        when (val s = screen) {
+            Screen.Home -> HomeScreen(
+                cameras = cameras,
+                onOpen = { screen = Screen.Live(it.id) },
+                onEdit = { screen = Screen.Edit(it.id) },
+                onAdd = { screen = Screen.Edit(null) },
+            )
 
-        OutlinedTextField(
-            value = config.host,
-            onValueChange = { onChange(config.copy(host = it)) },
-            label = { Text("IP de la cámara (ej. 192.168.1.50)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = config.port,
-            onValueChange = { onChange(config.copy(port = it)) },
-            label = { Text("Puerto RTSP") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = config.user,
-            onValueChange = { onChange(config.copy(user = it)) },
-            label = { Text("Usuario (opcional)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = config.password,
-            onValueChange = { onChange(config.copy(password = it)) },
-            label = { Text("Contraseña (opcional)") },
-            singleLine = true,
-            visualTransformation = PasswordVisualTransformation(),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        OutlinedTextField(
-            value = config.path,
-            onValueChange = { onChange(config.copy(path = it)) },
-            label = { Text("Ruta del stream (ej. live/ch00_0)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-
-        Button(
-            onClick = onWatch,
-            enabled = config.isValid(),
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Ver en vivo") }
-    }
-}
-
-@OptIn(UnstableApi::class)
-@Composable
-fun LiveView(url: String, onClose: () -> Unit) {
-    val context = LocalContext.current
-    var error by remember { mutableStateOf<String?>(null) }
-
-    val player = remember(url) {
-        ExoPlayer.Builder(context).build().apply {
-            val source = RtspMediaSource.Factory()
-                .setForceUseRtpTcp(true) // TCP: más fiable en WiFi doméstico
-                .createMediaSource(MediaItem.fromUri(url))
-            setMediaSource(source)
-            playWhenReady = true
-            prepare()
-        }
-    }
-
-    DisposableEffect(player) {
-        val listener = object : Player.Listener {
-            override fun onPlayerError(e: PlaybackException) {
-                error = "No se pudo conectar (${e.errorCodeName}). " +
-                    "Revisa IP, puerto, credenciales y ruta del stream."
+            is Screen.Edit -> {
+                BackHandler { screen = Screen.Home }
+                val existing = cameras.firstOrNull { it.id == s.id }
+                val deleteAction: (() -> Unit)? = if (existing == null) null else fun() {
+                    persist(cameras.filter { it.id != existing.id })
+                    screen = Screen.Home
+                }
+                EditScreen(
+                    camera = existing,
+                    onSave = { cam ->
+                        persist(
+                            if (existing != null) cameras.map { if (it.id == cam.id) cam else it }
+                            else cameras + cam,
+                        )
+                        screen = Screen.Home
+                    },
+                    onDelete = deleteAction,
+                    onBack = { screen = Screen.Home },
+                )
             }
 
-            override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_READY) error = null
+            is Screen.Live -> {
+                BackHandler { screen = Screen.Home }
+                val cam = cameras.firstOrNull { it.id == s.id }
+                if (cam != null) LiveScreen(camera = cam, onBack = { screen = Screen.Home })
             }
         }
-        player.addListener(listener)
-        onDispose {
-            player.removeListener(listener)
-            player.release()
-        }
-    }
-
-    // Mantener la pantalla encendida mientras se ve la cámara
-    val activity = context as? ComponentActivity
-    DisposableEffect(Unit) {
-        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        onDispose { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
-    }
-
-    Column(modifier = Modifier.fillMaxSize()) {
-        AndroidView(
-            factory = { ctx -> PlayerView(ctx).apply { this.player = player; useController = false } },
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-        )
-        error?.let {
-            Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp))
-        }
-        Button(
-            onClick = onClose,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-        ) { Text("Volver") }
     }
 }
