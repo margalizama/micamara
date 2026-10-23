@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Anillo exterior de la lente -->
+    <path
+        android:fillColor="#4FD1C5"
+        android:pathData="M37,54a17,17 0 1,0 34,0a17,17 0 1,0 -34,0z" />
+    <!-- Cristal oscuro -->
+    <path
+        android:fillColor="#0B1220"
+        android:pathData="M43,54a11,11 0 1,0 22,0a11,11 0 1,0 -22,0z" />
+    <!-- Iris -->
+    <path
+        android:fillColor="#1F3A5F"
+        android:pathData="M47,54a7,7 0 1,0 14,0a7,7 0 1,0 -14,0z" />
+    <!-- Reflejo -->
+    <path
+        android:fillColor="#9BF0E8"
+        android:pathData="M54.5,50.5a2.5,2.5 0 1,0 5,0a2.5,2.5 0 1,0 -5,0z" />
+    <!-- Flechas PTZ -->
+    <path
+        android:fillColor="#4FD1C5"
+        android:pathData="M54,22L58.5,29L49.5,29z" />
+    <path
+        android:fillColor="#4FD1C5"
+        android:pathData="M54,86L58.5,79L49.5,79z" />
+    <path
+        android:fillColor="#4FD1C5"
+        android:pathData="M22,54L29,49.5L29,58.5z" />
+    <path
+        android:fillColor="#4FD1C5"
+        android:pathData="M86,54L79,49.5L79,58.5z" />
+</vector>

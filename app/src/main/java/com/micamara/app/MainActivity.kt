@@ -91,7 +91,15 @@ fun App() {
             is Screen.Live -> {
                 BackHandler { screen = Screen.Home }
                 val cam = cameras.firstOrNull { it.id == s.id }
-                if (cam != null) LiveScreen(camera = cam, onBack = { screen = Screen.Home })
+                if (cam != null) {
+                    LiveScreen(
+                        camera = cam,
+                        onBack = { screen = Screen.Home },
+                        onCameraUpdated = { updated ->
+                            persist(cameras.map { if (it.id == updated.id) updated else it })
+                        },
+                    )
+                }
             }
         }
     }

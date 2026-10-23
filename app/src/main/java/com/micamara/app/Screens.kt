@@ -72,7 +72,9 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 // ───────────────────────── Inicio: lista de cámaras ─────────────────────────
 
@@ -200,6 +202,9 @@ fun EditScreen(
     var invertPan by remember { mutableStateOf(camera?.invertPan ?: false) }
     var invertTilt by remember { mutableStateOf(camera?.invertTilt ?: false) }
     var advanced by remember { mutableStateOf(false) }
+    var probing by remember { mutableStateOf(false) }
+    var probeTry by remember { mutableStateOf("") }
+    var probeMsg by remember { mutableStateOf<String?>(null) }
 
     var scanning by remember { mutableStateOf(false) }
     var scanned by remember { mutableStateOf(false) }
@@ -222,6 +227,37 @@ fun EditScreen(
             scanning = false
             scanned = true
             if (results.size == 1 && host.isBlank()) pick(results[0])
+        }
+    }
+
+    fun detectChannel() {
+        if (probing || host.isBlank()) return
+        scope.launch {
+            probing = true
+            probeMsg = null
+            val res = withContext(Dispatchers.IO) {
+                RtspProbe.find(host.trim(), user.trim(), pass, rtspPort.toIntOrNull() ?: 554, path) {
+                    probeTry = it
+                }
+            }
+            when (res) {
+                is ProbeResult.Found -> {
+                    path = res.stream.path
+                    rtspPort = res.stream.port.toString()
+                    probeMsg = "✓ Canal encontrado: /${res.stream.path} (puerto ${res.stream.port})"
+                }
+
+                ProbeResult.BadCredentials ->
+                    probeMsg = "La cámara pide usuario y contraseña, o no son correctos."
+
+                is ProbeResult.NotFound ->
+                    probeMsg = if (res.portOpen) {
+                        "No encontré el canal de video. Revisa que RTSP esté activo en la cámara."
+                    } else {
+                        "La cámara no responde por RTSP. Revisa la IP y que RTSP esté activo."
+                    }
+            }
+            probing = false
         }
     }
 
@@ -304,6 +340,20 @@ fun EditScreen(
         Field(user, { user = it }, "Usuario")
         Field(pass, { pass = it }, "Contraseña", secret = true)
 
+        OutlinedButton(
+            onClick = { detectChannel() },
+            enabled = host.isNotBlank() && !probing,
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth().height(50.dp),
+        ) { Text(if (probing) "Buscando canal…" else "🔎  Detectar canal del video") }
+        if (probing && probeTry.isNotBlank()) {
+            Text(probeTry, fontSize = 11.sp, color = cs.onSurfaceVariant)
+        }
+        val pm = probeMsg
+        if (pm != null) {
+            Text(pm, fontSize = 13.sp, color = if (pm.startsWith("✓")) cs.primary else cs.error)
+        }
+
         TextButton(onClick = { advanced = !advanced }) {
             Text(if (advanced) "Ocultar ajustes avanzados" else "Ajustes avanzados")
         }
@@ -385,7 +435,7 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
 
 @OptIn(UnstableApi::class)
 @Composable
-fun LiveScreen(camera: Camera, onBack: () -> Unit) {
+fun LiveScreen(camera: Camera, onBack: () -> Unit, onCameraUpdated: (Camera) -> Unit) {
     val cs = MaterialTheme.colorScheme
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -397,8 +447,12 @@ fun LiveScreen(camera: Camera, onBack: () -> Unit) {
     var speed by remember { mutableFloatStateOf(0.5f) }
     var lightIsOn by remember { mutableStateOf(false) }
     var lightError by remember { mutableStateOf<String?>(null) }
+    var rawError by remember { mutableStateOf("") }
+    var detecting by remember { mutableStateOf(false) }
+    var detectNote by remember { mutableStateOf("") }
+    var autoTried by remember(camera.id) { mutableStateOf(false) }
 
-    val exo = remember(camera.id) {
+    val exo = remember(camera.rtspUrl()) {
         ExoPlayer.Builder(context).build().apply {
             val source = RtspMediaSource.Factory()
                 .setForceUseRtpTcp(true) // TCP: más estable en WiFi doméstica
@@ -410,6 +464,8 @@ fun LiveScreen(camera: Camera, onBack: () -> Unit) {
     }
 
     DisposableEffect(exo) {
+        videoError = null
+        playerState = Player.STATE_IDLE
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 playerState = state
@@ -417,14 +473,44 @@ fun LiveScreen(camera: Camera, onBack: () -> Unit) {
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                videoError = "No se pudo abrir el video (${error.errorCodeName}). " +
-                    "Revisa la IP, el puerto 554, usuario/contraseña y la ruta del stream."
+                rawError = "${error.errorCodeName}: ${error.cause?.message ?: error.message ?: ""}"
+                videoError = "No se pudo abrir el video. Revisa la IP, usuario/contraseña y el canal."
             }
         }
         exo.addListener(listener)
         onDispose {
             exo.removeListener(listener)
             exo.release()
+        }
+    }
+
+    // Si el video falla, se busca solo el canal correcto (una vez por pantalla)
+    val hasError = videoError != null
+    LaunchedEffect(hasError) {
+        if (hasError && !autoTried) {
+            autoTried = true
+            detecting = true
+            val res = withContext(Dispatchers.IO) {
+                RtspProbe.find(camera.host, camera.user, camera.password, camera.rtspPort, camera.rtspPath) {
+                    detectNote = it
+                }
+            }
+            detecting = false
+            when (res) {
+                is ProbeResult.Found ->
+                    if (res.stream.path != camera.rtspPath || res.stream.port != camera.rtspPort) {
+                        onCameraUpdated(camera.copy(rtspPath = res.stream.path, rtspPort = res.stream.port))
+                    } else {
+                        videoError = "La cámara responde en /${camera.rtspPath}, pero el reproductor no pudo " +
+                            "abrir el video.\nDetalle: $rawError"
+                    }
+
+                ProbeResult.BadCredentials ->
+                    videoError = "La cámara pide usuario y contraseña, o no son correctos. Revísalos en Editar."
+
+                is ProbeResult.NotFound ->
+                    videoError = "No encontré el canal de video. Verifica la IP y que RTSP esté activo en la cámara."
+            }
         }
     }
 
@@ -509,7 +595,22 @@ fun LiveScreen(camera: Camera, onBack: () -> Unit) {
                 modifier = Modifier.fillMaxSize(),
             )
             val err = videoError
-            if (err != null) {
+            if (detecting) {
+                Column(
+                    Modifier.align(Alignment.Center).padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CircularProgressIndicator(Modifier.size(30.dp), strokeWidth = 3.dp)
+                    Text("Buscando el canal del video…", color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
+                    Text(
+                        detectNote,
+                        color = Color.White.copy(alpha = 0.5f),
+                        fontSize = 10.sp,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            } else if (err != null) {
                 Text(
                     err,
                     color = cs.error,
