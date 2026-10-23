@@ -67,6 +67,7 @@ class OnvifClient(
     private val dispatcher = executor.asCoroutineDispatcher()
     private var ptzUrl: String? = null
     private var profileToken: String? = null
+    private var mediaEndpoint: String? = null
 
     fun close() {
         executor.shutdownNow()
@@ -75,6 +76,26 @@ class OnvifClient(
     /** Descubre los servicios y el perfil de la cámara. Lanza IOException si falla. */
     suspend fun prepare() {
         withContext(dispatcher) { ensureReady() }
+    }
+
+    /** Pregunta a la cámara cuál es su URL RTSP (puerto y canal). Devuelve null si no la informa. */
+    suspend fun streamUri(): RtspStream? = withContext(dispatcher) {
+        ensureReady()
+        val r = call(
+            mediaEndpoint!!,
+            "<trt:GetStreamUri xmlns:trt=\"$NS_MEDIA\" xmlns:tt=\"$NS_SCHEMA\">" +
+                "<trt:StreamSetup><tt:Stream>RTP-Unicast</tt:Stream>" +
+                "<tt:Transport><tt:Protocol>RTSP</tt:Protocol></tt:Transport></trt:StreamSetup>" +
+                "<trt:ProfileToken>${profileToken}</trt:ProfileToken></trt:GetStreamUri>",
+        )
+        val uri = Regex("Uri>\\s*([^<\\s]+)\\s*<").find(r)?.groupValues?.get(1)
+            ?.replace("&amp;", "&")
+        if (uri == null) {
+            null
+        } else {
+            val u = URL(uri.replaceFirst("rtsp://", "http://"))
+            RtspStream(if (u.port > 0) u.port else 554, u.file.trimStart('/'))
+        }
     }
 
     suspend fun move(pan: Float, tilt: Float, zoom: Float) {
@@ -129,6 +150,7 @@ class OnvifClient(
         val token = Regex("Profiles[^>]*\\btoken=\"([^\"]+)\"").find(profiles)?.groupValues?.get(1)
             ?: throw IOException("la cámara no devolvió perfiles ONVIF")
         profileToken = token
+        mediaEndpoint = mediaUrl
         ptzUrl = ptz
     }
 

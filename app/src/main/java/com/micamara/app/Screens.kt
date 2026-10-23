@@ -1,8 +1,8 @@
 package com.micamara.app
 
 import android.app.Activity
+import android.net.Uri
 import android.view.WindowManager
-import androidx.annotation.OptIn
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -65,16 +65,14 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.rtsp.RtspMediaSource
-import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.videolan.libvlc.LibVLC
+import org.videolan.libvlc.Media
+import org.videolan.libvlc.MediaPlayer
+import org.videolan.libvlc.util.VLCVideoLayout
 
 // ───────────────────────── Inicio: lista de cámaras ─────────────────────────
 
@@ -433,14 +431,13 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
 
 // ───────────────────────── Vista en vivo + PTZ ─────────────────────────
 
-@OptIn(UnstableApi::class)
 @Composable
 fun LiveScreen(camera: Camera, onBack: () -> Unit, onCameraUpdated: (Camera) -> Unit) {
     val cs = MaterialTheme.colorScheme
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var playerState by remember { mutableIntStateOf(Player.STATE_IDLE) }
+    var playing by remember { mutableStateOf(false) }
     var videoError by remember { mutableStateOf<String?>(null) }
     var ptzOk by remember { mutableStateOf<Boolean?>(null) }
     var ptzStatus by remember { mutableStateOf("Conectando PTZ…") }
@@ -452,37 +449,67 @@ fun LiveScreen(camera: Camera, onBack: () -> Unit, onCameraUpdated: (Camera) -> 
     var detectNote by remember { mutableStateOf("") }
     var autoTried by remember(camera.id) { mutableStateOf(false) }
 
-    val exo = remember(camera.rtspUrl()) {
-        ExoPlayer.Builder(context).build().apply {
-            val source = RtspMediaSource.Factory()
-                .setForceUseRtpTcp(true) // TCP: más estable en WiFi doméstica
-                .createMediaSource(MediaItem.fromUri(camera.rtspUrl()))
-            setMediaSource(source)
-            playWhenReady = true
-            prepare()
-        }
-    }
+    val url = camera.rtspUrl()
 
-    DisposableEffect(exo) {
-        videoError = null
-        playerState = Player.STATE_IDLE
-        val listener = object : Player.Listener {
-            override fun onPlaybackStateChanged(state: Int) {
-                playerState = state
-                if (state == Player.STATE_READY) videoError = null
-            }
+    // ── Motor de video: VLC (acepta casi cualquier cámara) ──
+    val libVlc = remember { LibVLC(context, ArrayList<String>()) }
+    val vlc = remember(libVlc) { MediaPlayer(libVlc) }
+    var attempt by remember(url) { mutableIntStateOf(0) } // 0 = TCP, 1 = UDP
 
-            override fun onPlayerError(error: PlaybackException) {
-                rawError = "${error.errorCodeName}: ${error.cause?.message ?: error.message ?: ""}"
-                videoError = "No se pudo abrir el video. Revisa la IP, usuario/contraseña y el canal."
+    DisposableEffect(vlc) {
+        vlc.setEventListener { event ->
+            when (event.type) {
+                MediaPlayer.Event.Playing, MediaPlayer.Event.Vout -> {
+                    playing = true
+                    videoError = null
+                }
+
+                MediaPlayer.Event.EncounteredError -> {
+                    if (!playing) {
+                        rawError = "error de reproducción de VLC"
+                        videoError = "No se pudo abrir el video. Revisa la IP, usuario/contraseña y el canal."
+                    }
+                }
+
+                else -> {}
             }
         }
-        exo.addListener(listener)
         onDispose {
-            exo.removeListener(listener)
-            exo.release()
+            vlc.setEventListener(null)
+            vlc.stop()
+            vlc.detachViews()
+            vlc.release()
+            libVlc.release()
         }
     }
+
+    LaunchedEffect(url, attempt) {
+        playing = false
+        videoError = null
+        vlc.stop()
+        val media = Media(libVlc, Uri.parse(url))
+        media.setHWDecoderEnabled(true, false)
+        media.addOption(":network-caching=500")
+        if (attempt == 0) media.addOption(":rtsp-tcp")
+        vlc.media = media
+        media.release()
+        vlc.play()
+        delay(8000)
+        if (!playing && videoError == null) {
+            if (attempt == 0) {
+                attempt = 1 // reintenta con UDP
+            } else {
+                rawError = "tiempo de espera agotado"
+                videoError = "La cámara no respondió a tiempo."
+            }
+        }
+    }
+
+    // ── PTZ / ONVIF ──
+    val onvif = remember(camera.id) {
+        OnvifClient(camera.host, camera.onvifPort, camera.user, camera.password)
+    }
+    DisposableEffect(onvif) { onDispose { onvif.close() } }
 
     // Si el video falla, se busca solo el canal correcto (una vez por pantalla)
     val hasError = videoError != null
@@ -490,6 +517,17 @@ fun LiveScreen(camera: Camera, onBack: () -> Unit, onCameraUpdated: (Camera) -> 
         if (hasError && !autoTried) {
             autoTried = true
             detecting = true
+            detectNote = "Preguntando a la cámara por ONVIF…"
+            val fromOnvif = try {
+                onvif.streamUri()
+            } catch (e: Exception) {
+                null
+            }
+            if (fromOnvif != null && (fromOnvif.path != camera.rtspPath || fromOnvif.port != camera.rtspPort)) {
+                detecting = false
+                onCameraUpdated(camera.copy(rtspPath = fromOnvif.path, rtspPort = fromOnvif.port))
+                return@LaunchedEffect
+            }
             val res = withContext(Dispatchers.IO) {
                 RtspProbe.find(camera.host, camera.user, camera.password, camera.rtspPort, camera.rtspPath) {
                     detectNote = it
@@ -501,8 +539,8 @@ fun LiveScreen(camera: Camera, onBack: () -> Unit, onCameraUpdated: (Camera) -> 
                     if (res.stream.path != camera.rtspPath || res.stream.port != camera.rtspPort) {
                         onCameraUpdated(camera.copy(rtspPath = res.stream.path, rtspPort = res.stream.port))
                     } else {
-                        videoError = "La cámara responde en /${camera.rtspPath}, pero el reproductor no pudo " +
-                            "abrir el video.\nDetalle: $rawError"
+                        videoError = "La cámara responde en /${camera.rtspPath}, pero el video no abrió.\n" +
+                            "Detalle: $rawError"
                     }
 
                 ProbeResult.BadCredentials ->
@@ -513,11 +551,6 @@ fun LiveScreen(camera: Camera, onBack: () -> Unit, onCameraUpdated: (Camera) -> 
             }
         }
     }
-
-    val onvif = remember(camera.id) {
-        OnvifClient(camera.host, camera.onvifPort, camera.user, camera.password)
-    }
-    DisposableEffect(onvif) { onDispose { onvif.close() } }
 
     LaunchedEffect(onvif) {
         try {
@@ -587,10 +620,7 @@ fun LiveScreen(camera: Camera, onBack: () -> Unit, onCameraUpdated: (Camera) -> 
         ) {
             AndroidView(
                 factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        this.player = exo
-                        useController = false
-                    }
+                    VLCVideoLayout(ctx).also { layout -> vlc.attachViews(layout, null, false, false) }
                 },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -618,7 +648,7 @@ fun LiveScreen(camera: Camera, onBack: () -> Unit, onCameraUpdated: (Camera) -> 
                     fontSize = 13.sp,
                     modifier = Modifier.align(Alignment.Center).padding(20.dp),
                 )
-            } else if (playerState != Player.STATE_READY) {
+            } else if (!playing) {
                 Column(
                     Modifier.align(Alignment.Center),
                     horizontalAlignment = Alignment.CenterHorizontally,
