@@ -19,14 +19,36 @@ data class Camera(
     val lightOffCmd: String = "tt:IRLamp|Off",
     val invertPan: Boolean = false,
     val invertTilt: Boolean = false,
+    // Acceso remoto (fuera de casa): IP de VPN o dominio. 0 = mismo puerto que en casa.
+    val remoteHost: String = "",
+    val remoteRtspPort: Int = 0,
+    val remoteOnvifPort: Int = 0,
+    // Movimiento por pasos: para cámaras que no se detienen al soltar.
+    val stepMode: Boolean = false,
 ) {
+    fun hasRemote() = remoteHost.isNotBlank()
+
     /** URL RTSP con usuario y contraseña codificados. */
-    fun rtspUrl(): String {
+    fun rtspUrl(path: String = rtspPath, port: Int = rtspPort): String {
         val auth = if (user.isNotBlank()) {
             Uri.encode(user) + (if (password.isNotEmpty()) ":" + Uri.encode(password) else "") + "@"
         } else ""
-        return "rtsp://$auth${host.trim()}:$rtspPort/${rtspPath.trim().trimStart('/')}"
+        return "rtsp://$auth${host.trim()}:$port/${path.trim().trimStart('/')}"
     }
+
+    /** Devuelve la cámara con la dirección que toca usar (en casa o remota). */
+    fun forRoute(remote: Boolean): Camera =
+        if (!remote || !hasRemote()) this
+        else copy(
+            host = remoteHost.trim(),
+            rtspPort = if (remoteRtspPort > 0) remoteRtspPort else rtspPort,
+            onvifPort = if (remoteOnvifPort > 0) remoteOnvifPort else onvifPort,
+        )
+
+    /** Guarda el canal encontrado en el puerto que corresponde a la ruta usada. */
+    fun withChannel(path: String, port: Int, remote: Boolean): Camera =
+        if (remote && hasRemote()) copy(rtspPath = path, remoteRtspPort = port)
+        else copy(rtspPath = path, rtspPort = port)
 
     fun toJson(): JSONObject = JSONObject()
         .put("id", id)
@@ -41,6 +63,10 @@ data class Camera(
         .put("lightOffCmd", lightOffCmd)
         .put("invertPan", invertPan)
         .put("invertTilt", invertTilt)
+        .put("remoteHost", remoteHost)
+        .put("remoteRtspPort", remoteRtspPort)
+        .put("remoteOnvifPort", remoteOnvifPort)
+        .put("stepMode", stepMode)
 
     companion object {
         fun fromJson(o: JSONObject) = Camera(
@@ -56,6 +82,10 @@ data class Camera(
             lightOffCmd = o.optString("lightOffCmd", "tt:IRLamp|Off"),
             invertPan = o.optBoolean("invertPan", false),
             invertTilt = o.optBoolean("invertTilt", false),
+            remoteHost = o.optString("remoteHost"),
+            remoteRtspPort = o.optInt("remoteRtspPort", 0),
+            remoteOnvifPort = o.optInt("remoteOnvifPort", 0),
+            stepMode = o.optBoolean("stepMode", false),
         )
     }
 }

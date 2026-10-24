@@ -36,8 +36,10 @@ class MainActivity : ComponentActivity() {
 
 sealed interface Screen {
     data object Home : Screen
+    data object Gallery : Screen
     data class Edit(val id: String?) : Screen
     data class Live(val id: String) : Screen
+    data class Sd(val id: String, val remote: Boolean) : Screen
 }
 
 @Composable
@@ -65,7 +67,13 @@ fun App() {
                 onOpen = { screen = Screen.Live(it.id) },
                 onEdit = { screen = Screen.Edit(it.id) },
                 onAdd = { screen = Screen.Edit(null) },
+                onGallery = { screen = Screen.Gallery },
             )
+
+            Screen.Gallery -> {
+                BackHandler { screen = Screen.Home }
+                GalleryScreen(onBack = { screen = Screen.Home })
+            }
 
             is Screen.Edit -> {
                 BackHandler { screen = Screen.Home }
@@ -98,8 +106,15 @@ fun App() {
                         onCameraUpdated = { updated ->
                             persist(cameras.map { if (it.id == updated.id) updated else it })
                         },
+                        onOpenSd = { remote -> screen = Screen.Sd(cam.id, remote) },
                     )
                 }
+            }
+
+            is Screen.Sd -> {
+                BackHandler { screen = Screen.Live(s.id) }
+                val cam = cameras.firstOrNull { it.id == s.id }?.forRoute(s.remote)
+                if (cam != null) SdScreen(camera = cam, onBack = { screen = Screen.Live(s.id) })
             }
         }
     }

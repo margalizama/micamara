@@ -82,12 +82,22 @@ fun HomeScreen(
     onOpen: (Camera) -> Unit,
     onEdit: (Camera) -> Unit,
     onAdd: () -> Unit,
+    onGallery: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(28.dp))
-            Text("Mi Cámara", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = cs.onBackground)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Mi Cámara",
+                    fontSize = 32.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = cs.onBackground,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onGallery) { Text("🖼 Capturas") }
+            }
             Text(
                 if (cameras.isEmpty()) "Sin anuncios · sin cuentas" else "${cameras.size} cámara(s) · sin anuncios",
                 color = cs.onSurfaceVariant,
@@ -199,6 +209,10 @@ fun EditScreen(
     var lightOff by remember { mutableStateOf(camera?.lightOffCmd ?: "tt:IRLamp|Off") }
     var invertPan by remember { mutableStateOf(camera?.invertPan ?: false) }
     var invertTilt by remember { mutableStateOf(camera?.invertTilt ?: false) }
+    var stepMode by remember { mutableStateOf(camera?.stepMode ?: false) }
+    var remoteHost by remember { mutableStateOf(camera?.remoteHost ?: "") }
+    var remoteRtsp by remember { mutableStateOf(if ((camera?.remoteRtspPort ?: 0) > 0) camera!!.remoteRtspPort.toString() else "") }
+    var remoteOnvif by remember { mutableStateOf(if ((camera?.remoteOnvifPort ?: 0) > 0) camera!!.remoteOnvifPort.toString() else "") }
     var advanced by remember { mutableStateOf(false) }
     var probing by remember { mutableStateOf(false) }
     var probeTry by remember { mutableStateOf("") }
@@ -363,6 +377,22 @@ fun EditScreen(
             Field(lightOff, { lightOff = it }, "Comando para apagar la luz")
             SwitchRow("Invertir giro izquierda/derecha", invertPan) { invertPan = it }
             SwitchRow("Invertir inclinación arriba/abajo", invertTilt) { invertTilt = it }
+            SwitchRow("Movimiento por pasos (si la cámara no se detiene)", stepMode) { stepMode = it }
+
+            Surface(shape = RoundedCornerShape(18.dp), color = cs.surface, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("🌐  Acceso remoto (fuera de casa)", fontWeight = FontWeight.SemiBold, color = cs.onSurface)
+                    Text(
+                        "Escribe la IP de tu VPN (por ejemplo Tailscale) o tu dominio. La app usa la dirección " +
+                            "de casa si la cámara responde y esta si no. No abras puertos del router a Internet.",
+                        fontSize = 12.sp,
+                        color = cs.onSurfaceVariant,
+                    )
+                    Field(remoteHost, { remoteHost = it }, "IP o dominio remoto")
+                    Field(remoteRtsp, { remoteRtsp = it }, "Puerto RTSP remoto (vacío = el mismo)", KeyboardType.Number)
+                    Field(remoteOnvif, { remoteOnvif = it }, "Puerto ONVIF remoto (vacío = el mismo)", KeyboardType.Number)
+                }
+            }
         }
 
         Button(
@@ -382,6 +412,10 @@ fun EditScreen(
                         lightOffCmd = lightOff.trim(),
                         invertPan = invertPan,
                         invertTilt = invertTilt,
+                        stepMode = stepMode,
+                        remoteHost = remoteHost.trim(),
+                        remoteRtspPort = remoteRtsp.toIntOrNull() ?: 0,
+                        remoteOnvifPort = remoteOnvif.toIntOrNull() ?: 0,
                     ),
                 )
             },
@@ -426,422 +460,5 @@ private fun SwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         Text(label, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = onChange)
-    }
-}
-
-// ───────────────────────── Vista en vivo + PTZ ─────────────────────────
-
-@Composable
-fun LiveScreen(camera: Camera, onBack: () -> Unit, onCameraUpdated: (Camera) -> Unit) {
-    val cs = MaterialTheme.colorScheme
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-
-    var playing by remember { mutableStateOf(false) }
-    var videoError by remember { mutableStateOf<String?>(null) }
-    var ptzOk by remember { mutableStateOf<Boolean?>(null) }
-    var ptzStatus by remember { mutableStateOf("Conectando PTZ…") }
-    var speed by remember { mutableFloatStateOf(0.5f) }
-    var lightIsOn by remember { mutableStateOf(false) }
-    var lightError by remember { mutableStateOf<String?>(null) }
-    var rawError by remember { mutableStateOf("") }
-    var detecting by remember { mutableStateOf(false) }
-    var detectNote by remember { mutableStateOf("") }
-    var autoTried by remember(camera.id) { mutableStateOf(false) }
-
-    val url = camera.rtspUrl()
-
-    // ── Motor de video: VLC (acepta casi cualquier cámara) ──
-    val libVlc = remember { LibVLC(context, ArrayList<String>()) }
-    val vlc = remember(libVlc) { MediaPlayer(libVlc) }
-    var attempt by remember(url) { mutableIntStateOf(0) } // 0 = TCP, 1 = UDP
-
-    DisposableEffect(vlc) {
-        vlc.setEventListener { event ->
-            when (event.type) {
-                MediaPlayer.Event.Playing, MediaPlayer.Event.Vout -> {
-                    playing = true
-                    videoError = null
-                }
-
-                MediaPlayer.Event.EncounteredError -> {
-                    if (!playing) {
-                        rawError = "error de reproducción de VLC"
-                        videoError = "No se pudo abrir el video. Revisa la IP, usuario/contraseña y el canal."
-                    }
-                }
-
-                else -> {}
-            }
-        }
-        onDispose {
-            vlc.setEventListener(null)
-            vlc.stop()
-            vlc.detachViews()
-            vlc.release()
-            libVlc.release()
-        }
-    }
-
-    LaunchedEffect(url, attempt) {
-        playing = false
-        videoError = null
-        vlc.stop()
-        val media = Media(libVlc, Uri.parse(url))
-        media.setHWDecoderEnabled(true, false)
-        media.addOption(":network-caching=500")
-        if (attempt == 0) media.addOption(":rtsp-tcp")
-        vlc.media = media
-        media.release()
-        vlc.play()
-        delay(8000)
-        if (!playing && videoError == null) {
-            if (attempt == 0) {
-                attempt = 1 // reintenta con UDP
-            } else {
-                rawError = "tiempo de espera agotado"
-                videoError = "La cámara no respondió a tiempo."
-            }
-        }
-    }
-
-    // ── PTZ / ONVIF ──
-    val onvif = remember(camera.id) {
-        OnvifClient(camera.host, camera.onvifPort, camera.user, camera.password)
-    }
-    DisposableEffect(onvif) { onDispose { onvif.close() } }
-
-    // Si el video falla, se busca solo el canal correcto (una vez por pantalla)
-    val hasError = videoError != null
-    LaunchedEffect(hasError) {
-        if (hasError && !autoTried) {
-            autoTried = true
-            detecting = true
-            detectNote = "Preguntando a la cámara por ONVIF…"
-            val fromOnvif = try {
-                onvif.streamUri()
-            } catch (e: Exception) {
-                null
-            }
-            if (fromOnvif != null && (fromOnvif.path != camera.rtspPath || fromOnvif.port != camera.rtspPort)) {
-                detecting = false
-                onCameraUpdated(camera.copy(rtspPath = fromOnvif.path, rtspPort = fromOnvif.port))
-                return@LaunchedEffect
-            }
-            val res = withContext(Dispatchers.IO) {
-                RtspProbe.find(camera.host, camera.user, camera.password, camera.rtspPort, camera.rtspPath) {
-                    detectNote = it
-                }
-            }
-            detecting = false
-            when (res) {
-                is ProbeResult.Found ->
-                    if (res.stream.path != camera.rtspPath || res.stream.port != camera.rtspPort) {
-                        onCameraUpdated(camera.copy(rtspPath = res.stream.path, rtspPort = res.stream.port))
-                    } else {
-                        videoError = "La cámara responde en /${camera.rtspPath}, pero el video no abrió.\n" +
-                            "Detalle: $rawError"
-                    }
-
-                ProbeResult.BadCredentials ->
-                    videoError = "La cámara pide usuario y contraseña, o no son correctos. Revísalos en Editar."
-
-                is ProbeResult.NotFound ->
-                    videoError = "No encontré el canal de video. Verifica la IP y que RTSP esté activo en la cámara."
-            }
-        }
-    }
-
-    LaunchedEffect(onvif) {
-        try {
-            onvif.prepare()
-            ptzOk = true
-            ptzStatus = "PTZ listo"
-        } catch (e: Exception) {
-            ptzOk = false
-            ptzStatus = "PTZ no disponible (${e.message}). Revisa el puerto ONVIF " +
-                "(${camera.onvifPort}) y la contraseña en Editar > Ajustes avanzados."
-        }
-    }
-
-    // Pantalla encendida mientras se ve la cámara
-    val activity = context as? Activity
-    DisposableEffect(Unit) {
-        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        onDispose { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
-    }
-
-    fun send(pan: Float, tilt: Float, zoom: Float) {
-        val p = if (camera.invertPan) -pan else pan
-        val t = if (camera.invertTilt) -tilt else tilt
-        scope.launch {
-            try {
-                onvif.move(p, t, zoom)
-            } catch (e: Exception) {
-                ptzOk = false
-                ptzStatus = "Error PTZ: ${e.message}"
-            }
-        }
-    }
-
-    fun halt() {
-        scope.launch {
-            try {
-                onvif.stop()
-            } catch (e: Exception) {
-                // el siguiente movimiento reintenta
-            }
-        }
-    }
-
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = onBack) { Text("‹ Volver") }
-            Spacer(Modifier.weight(1f))
-            Text(
-                camera.name.ifBlank { camera.host },
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp,
-                color = cs.onBackground,
-                modifier = Modifier.padding(end = 8.dp),
-            )
-        }
-
-        // Video
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f)
-                .clip(RoundedCornerShape(22.dp))
-                .background(Color.Black),
-        ) {
-            AndroidView(
-                factory = { ctx ->
-                    VLCVideoLayout(ctx).also { layout -> vlc.attachViews(layout, null, false, false) }
-                },
-                modifier = Modifier.fillMaxSize(),
-            )
-            val err = videoError
-            if (detecting) {
-                Column(
-                    Modifier.align(Alignment.Center).padding(16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    CircularProgressIndicator(Modifier.size(30.dp), strokeWidth = 3.dp)
-                    Text("Buscando el canal del video…", color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
-                    Text(
-                        detectNote,
-                        color = Color.White.copy(alpha = 0.5f),
-                        fontSize = 10.sp,
-                        textAlign = TextAlign.Center,
-                    )
-                }
-            } else if (err != null) {
-                Text(
-                    err,
-                    color = cs.error,
-                    textAlign = TextAlign.Center,
-                    fontSize = 13.sp,
-                    modifier = Modifier.align(Alignment.Center).padding(20.dp),
-                )
-            } else if (!playing) {
-                Column(
-                    Modifier.align(Alignment.Center),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    CircularProgressIndicator(Modifier.size(30.dp), strokeWidth = 3.dp)
-                    Text("Conectando…", color = Color.White.copy(alpha = 0.8f), fontSize = 13.sp)
-                }
-            } else {
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = Color.Black.copy(alpha = 0.55f),
-                    modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
-                ) {
-                    Text(
-                        "● EN VIVO",
-                        color = Color(0xFFFF5C5C),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                    )
-                }
-            }
-        }
-
-        // Control PTZ
-        Surface(shape = RoundedCornerShape(26.dp), color = cs.surface, modifier = Modifier.fillMaxWidth()) {
-            Column(
-                Modifier.padding(18.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Control PTZ",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp,
-                        color = cs.onSurface,
-                        modifier = Modifier.weight(1f),
-                    )
-                    val dot = when (ptzOk) {
-                        true -> Color(0xFF4ADE80)
-                        false -> cs.error
-                        null -> Color(0xFFFACC15)
-                    }
-                    Box(Modifier.size(10.dp).clip(CircleShape).background(dot))
-                }
-
-                PtzPad(
-                    onMove = { px, py -> send(px * speed, py * speed, 0f) },
-                    onStop = { halt() },
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    HoldButton(
-                        label = "－  Zoom",
-                        modifier = Modifier.width(140.dp).height(52.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        textSize = 15.sp,
-                        onDown = { send(0f, 0f, -speed) },
-                        onUp = { halt() },
-                    )
-                    HoldButton(
-                        label = "＋  Zoom",
-                        modifier = Modifier.width(140.dp).height(52.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        textSize = 15.sp,
-                        onDown = { send(0f, 0f, speed) },
-                        onUp = { halt() },
-                    )
-                }
-
-                Column(Modifier.fillMaxWidth()) {
-                    Text("Velocidad", fontSize = 13.sp, color = cs.onSurfaceVariant)
-                    Slider(value = speed, onValueChange = { speed = it }, valueRange = 0.1f..1f)
-                }
-
-                Text(
-                    ptzStatus,
-                    fontSize = 12.sp,
-                    color = if (ptzOk == false) cs.error else cs.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
-            }
-        }
-
-        // Luz LED
-        Surface(shape = RoundedCornerShape(22.dp), color = cs.surface, modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("💡", fontSize = 26.sp)
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text("Luz LED", fontWeight = FontWeight.SemiBold, color = cs.onSurface)
-                        Text(
-                            if (lightIsOn) "Encendida" else "Apagada",
-                            fontSize = 12.sp,
-                            color = cs.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = lightIsOn,
-                        onCheckedChange = { on ->
-                            lightIsOn = on
-                            scope.launch {
-                                try {
-                                    onvif.aux(if (on) camera.lightOnCmd else camera.lightOffCmd)
-                                    lightError = null
-                                } catch (e: Exception) {
-                                    lightIsOn = !on
-                                    lightError = "La cámara no aceptó el comando de luz (${e.message}). " +
-                                        "Depende del modelo: puedes cambiar el comando en Editar > Ajustes avanzados."
-                                }
-                            }
-                        },
-                    )
-                }
-                val le = lightError
-                if (le != null) Text(le, fontSize = 12.sp, color = cs.error)
-            }
-        }
-        Spacer(Modifier.height(24.dp))
-    }
-}
-
-@Composable
-private fun PtzPad(onMove: (Float, Float) -> Unit, onStop: () -> Unit) {
-    val cs = MaterialTheme.colorScheme
-    Box(
-        Modifier.size(240.dp).clip(CircleShape).background(cs.surfaceVariant),
-        contentAlignment = Alignment.Center,
-    ) {
-        PadKey("▲", Alignment.TopCenter, { onMove(0f, 1f) }, onStop)
-        PadKey("▼", Alignment.BottomCenter, { onMove(0f, -1f) }, onStop)
-        PadKey("◀", Alignment.CenterStart, { onMove(-1f, 0f) }, onStop)
-        PadKey("▶", Alignment.CenterEnd, { onMove(1f, 0f) }, onStop)
-        Box(
-            Modifier.size(70.dp).clip(CircleShape).background(cs.background),
-            contentAlignment = Alignment.Center,
-        ) { Text("PTZ", color = cs.onSurfaceVariant, fontWeight = FontWeight.Bold, fontSize = 14.sp) }
-    }
-}
-
-@Composable
-private fun BoxScope.PadKey(label: String, alignment: Alignment, onDown: () -> Unit, onUp: () -> Unit) {
-    HoldButton(
-        label = label,
-        modifier = Modifier.align(alignment).padding(10.dp).size(68.dp),
-        shape = CircleShape,
-        onDown = onDown,
-        onUp = onUp,
-    )
-}
-
-/** Botón que actúa mientras lo mantienes presionado y se detiene al soltarlo. */
-@Composable
-private fun HoldButton(
-    label: String,
-    modifier: Modifier,
-    shape: Shape,
-    onDown: () -> Unit,
-    onUp: () -> Unit,
-    textSize: TextUnit = 24.sp,
-) {
-    val cs = MaterialTheme.colorScheme
-    var pressed by remember { mutableStateOf(false) }
-    val down by rememberUpdatedState(onDown)
-    val up by rememberUpdatedState(onUp)
-    Box(
-        modifier = modifier
-            .clip(shape)
-            .background(if (pressed) cs.primary else cs.outline)
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        pressed = true
-                        down()
-                        try {
-                            tryAwaitRelease()
-                        } finally {
-                            pressed = false
-                            up()
-                        }
-                    },
-                )
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            label,
-            color = if (pressed) cs.onPrimary else cs.onSurface,
-            fontSize = textSize,
-            fontWeight = FontWeight.Bold,
-        )
     }
 }

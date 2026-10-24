@@ -41,6 +41,16 @@ object WifiBinder {
     }
 }
 
+/** Libera el uso exclusivo de la WiFi (para poder salir por datos móviles al ver la cámara remota). */
+internal fun WifiBinder.unbind(context: Context) {
+    try {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        cm.bindProcessToNetwork(null)
+    } catch (e: Exception) {
+        // nada que hacer
+    }
+}
+
 object Discovery {
 
     /** Busca cámaras en la red local: ONVIF (WS-Discovery) + escaneo del puerto RTSP 554. */
